@@ -44,6 +44,7 @@ markdown.workspace = true
 menu.workspace = true
 multi_buffer.workspace = true
 notifications.workspace = true
+outline_panel.workspace = true
 picker.workspace = true
 project.workspace = true
 prompt_store.workspace = true

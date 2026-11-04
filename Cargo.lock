@@ -7084,6 +7084,7 @@ dependencies = [
  "menu",
  "multi_buffer",
  "notifications",
+ "outline_panel",
  "picker",
  "pretty_assertions",
  "project",

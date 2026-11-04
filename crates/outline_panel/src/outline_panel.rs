@@ -5180,7 +5180,19 @@ impl OutlinePanel {
         if !self.multi_buffer_active(cx) {
             return;
         }
-        self.hide_symbols_override = Some(!self.hide_symbols_active(cx));
+        self.set_symbols_hidden(!self.hide_symbols_active(cx), window, cx);
+    }
+
+    pub fn set_symbols_hidden(
+        &mut self,
+        hidden: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.hide_symbols_active(cx) == hidden {
+            return;
+        }
+        self.hide_symbols_override = Some(hidden);
         self.update_non_fs_items(window, cx);
         self.remap_selection_for_hidden_symbols(window, cx);
         self.update_cached_entries(None, window, cx);
@@ -12243,6 +12255,41 @@ outline: struct Foo  <==== selected
             assert_eq!(
                 panel.collapsed_entries, collapsed_entries_snapshot,
                 "settings-driven override reset should not mutate collapsed_entries"
+            );
+        });
+
+        outline_panel.update_in(cx, |panel, window, cx| {
+            panel.set_symbols_hidden(true, window, cx);
+            panel.set_symbols_hidden(true, window, cx);
+        });
+        cx.executor()
+            .advance_clock(UPDATE_DEBOUNCE + Duration::from_millis(500));
+        cx.run_until_parked();
+
+        outline_panel.update(cx, |panel, _cx| {
+            assert!(
+                panel.cached_entries.iter().all(|entry| matches!(
+                    entry.entry,
+                    PanelEntry::Fs(_) | PanelEntry::FoldedDirs(_)
+                )),
+                "setting hidden symbols repeatedly should keep only file and directory rows"
+            );
+        });
+
+        outline_panel.update_in(cx, |panel, window, cx| {
+            panel.set_symbols_hidden(false, window, cx);
+        });
+        cx.executor()
+            .advance_clock(UPDATE_DEBOUNCE + Duration::from_millis(500));
+        cx.run_until_parked();
+
+        outline_panel.update(cx, |panel, _cx| {
+            assert!(
+                panel.cached_entries.iter().any(|entry| matches!(
+                    entry.entry,
+                    PanelEntry::Outline(OutlineEntry::Outline(_))
+                )),
+                "showing symbols should restore outline rows"
             );
         });
 

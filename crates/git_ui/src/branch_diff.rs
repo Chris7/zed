@@ -18,6 +18,7 @@ use gpui::{
     SharedString, Subscription, Task, WeakEntity,
 };
 use language::{BufferId, Capability};
+use outline_panel::OutlinePanel;
 use project::{
     Project, ProjectPath,
     git_store::{
@@ -727,6 +728,27 @@ impl BranchDiffToolbar {
             cx.dispatch_action(action.as_ref());
         })
     }
+
+    fn toggle_changed_files(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(branch_diff) = self.branch_diff(cx) else {
+            return;
+        };
+        let Some(workspace) = branch_diff.read(cx).workspace.upgrade() else {
+            return;
+        };
+
+        if let Some(outline_panel) = workspace.read(cx).panel::<OutlinePanel>(cx) {
+            outline_panel.update(cx, |outline_panel, cx| {
+                outline_panel.set_symbols_hidden(true, window, cx);
+            });
+        }
+
+        workspace.update(cx, |workspace, cx| {
+            if !workspace.toggle_panel_focus::<OutlinePanel>(window, cx) {
+                workspace.close_panel::<OutlinePanel>(window, cx);
+            }
+        });
+    }
 }
 
 impl EventEmitter<ToolbarItemEvent> for BranchDiffToolbar {}
@@ -801,6 +823,7 @@ impl Render for BranchDiffToolbar {
             .read(cx)
             .is_empty();
         let is_ai_enabled = AgentSettings::get_global(cx).enabled(cx);
+        let files_focus_handle = focus_handle.clone();
 
         let show_review_button = !is_multibuffer_empty && is_ai_enabled;
 
@@ -876,6 +899,27 @@ impl Render for BranchDiffToolbar {
                         Tooltip::text("Select Base Branch"),
                     ),
             )
+            .child(Divider::vertical())
+            .child(
+                Button::new("branch-diff-changed-files", "Files")
+                    .start_icon(
+                        Icon::new(IconName::ListTree)
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .tooltip(move |_, cx| {
+                        Tooltip::with_meta_in(
+                            "Toggle Changed Files",
+                            Some(&outline_panel::Toggle),
+                            "Show changed files in the Outline Panel.",
+                            &files_focus_handle,
+                            cx,
+                        )
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.toggle_changed_files(window, cx);
+                    })),
+            )
             .when(show_review_button, |this| {
                 let focus_handle = focus_handle.clone();
                 this.child(Divider::vertical()).child(
@@ -928,7 +972,7 @@ mod tests {
         path,
         rel_path::{RelPath, rel_path},
     };
-    use workspace::MultiWorkspace;
+    use workspace::{MultiWorkspace, dock::Panel as _};
 
     use super::*;
 
@@ -1197,6 +1241,111 @@ mod tests {
                 )
             ])
         );
+    }
+
+    #[gpui::test]
+    async fn test_branch_diff_files_button_opens_and_closes_outline_panel(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/project"),
+            json!({
+                ".git": {},
+                "changed.txt": "new",
+            }),
+        )
+        .await;
+        fs.set_head_for_repo(
+            Path::new(path!("/project/.git")),
+            &[("changed.txt", "new".into())],
+            "head",
+        );
+        fs.set_merge_base_content_for_repo(
+            Path::new(path!("/project/.git")),
+            &[("changed.txt", "old".into())],
+        );
+        let project = Project::test(fs, [path!("/project").as_ref()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        cx.run_until_parked();
+
+        let repository = project.read_with(cx, |project, cx| {
+            project
+                .git_store()
+                .read(cx)
+                .active_repository()
+                .expect("active repository")
+        });
+        let branch_diff = cx
+            .update(|window, cx| {
+                BranchDiff::new_with_branch_base(
+                    project.clone(),
+                    workspace.clone(),
+                    "origin/main".into(),
+                    repository,
+                    None,
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_item_to_active_pane(
+                Box::new(branch_diff.clone()),
+                None,
+                true,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(branch_diff.read_with(cx, |branch_diff, cx| {
+            !branch_diff.diff.read(cx).multibuffer().read(cx).is_empty()
+        }));
+
+        let workspace_weak = workspace.downgrade();
+        let outline_panel = cx
+            .update(|window, cx| {
+                window.spawn(cx, async move |cx| {
+                    OutlinePanel::load(workspace_weak, cx.clone()).await
+                })
+            })
+            .await
+            .unwrap();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(outline_panel.clone(), window, cx);
+        });
+
+        let toolbar = cx.update(|_, cx| {
+            cx.new(|_| BranchDiffToolbar {
+                branch_diff: Some(branch_diff.downgrade()),
+            })
+        });
+
+        toolbar.update_in(cx, |toolbar, window, cx| {
+            toolbar.toggle_changed_files(window, cx);
+        });
+        outline_panel.update_in(cx, |outline_panel, window, cx| {
+            assert!(outline_panel.focus_handle(cx).contains_focused(window, cx));
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            let position = outline_panel.read(cx).position(window, cx);
+            assert!(workspace.dock_at_position(position).read(cx).is_open());
+        });
+
+        toolbar.update_in(cx, |toolbar, window, cx| {
+            toolbar.toggle_changed_files(window, cx);
+        });
+        outline_panel.update_in(cx, |outline_panel, window, cx| {
+            assert!(!outline_panel.focus_handle(cx).contains_focused(window, cx));
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            let position = outline_panel.read(cx).position(window, cx);
+            assert!(!workspace.dock_at_position(position).read(cx).is_open());
+        });
     }
 
     #[gpui::test(iterations = 10)]
