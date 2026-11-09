@@ -95,7 +95,7 @@ fn rpc_error_raw_message_from_chain(error: &anyhow::Error) -> Option<&str> {
         .find_map(|cause| cause.downcast_ref::<RpcError>().map(RpcError::raw_message))
 }
 
-fn format_git_error_toast_message(error: &anyhow::Error) -> String {
+pub fn format_git_error_toast_message(error: &anyhow::Error) -> String {
     if let Some(message) = rpc_error_raw_message_from_chain(error) {
         message.trim().to_string()
     } else {
