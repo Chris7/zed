@@ -1,7 +1,9 @@
 mod branch_mode;
 
 use git_ui_core::askpass_modal::AskPassModal;
-pub(crate) use git_ui_core::notifications::{open_output, show_error_toast};
+pub(crate) use git_ui_core::notifications::{
+    format_git_error_toast_message, open_output, show_error_toast,
+};
 use language_model_selector::{LanguageModelSelector, language_model_picker, toggle_in_settings};
 
 use crate::branch_diff::BranchDiff;
@@ -1327,6 +1329,7 @@ pub struct GitPanel {
     diff_stat_total: DiffStat,
     new_staged_count: usize,
     pending_commit: Option<Task<()>>,
+    commit_errors: HashMap<RepositoryId, String>,
     pending_remote_operation: Option<RemoteOperationKind>,
     amend_pending: bool,
     original_commit_message: Option<String>,
@@ -1649,8 +1652,11 @@ impl GitPanel {
                         true,
                     )
                     | GitStoreEvent::RepositoryAdded
-                    | GitStoreEvent::RepositoryRemoved(_)
                     | GitStoreEvent::ActiveRepositoryChanged(_) => {
+                        this.schedule_update(window, cx);
+                    }
+                    GitStoreEvent::RepositoryRemoved(repository_id) => {
+                        this.commit_errors.remove(repository_id);
                         this.schedule_update(window, cx);
                     }
                     GitStoreEvent::GlobalConfigurationUpdated => {
@@ -1735,6 +1741,7 @@ impl GitPanel {
                 changes_count: 0,
                 diff_stat_total: DiffStat::default(),
                 pending_commit: None,
+                commit_errors: HashMap::default(),
                 pending_remote_operation: None,
                 amend_pending,
                 original_commit_message,
@@ -4345,6 +4352,7 @@ impl GitPanel {
         let Some(active_repository) = self.active_repository.clone() else {
             return;
         };
+        let repository_id = active_repository.read(cx).id;
         let error_spawn = |message, window: &mut Window, cx: &mut App| {
             let prompt = window.prompt(PromptLevel::Warning, message, None, &["OK"], cx);
             cx.spawn(async move |_| {
@@ -4413,6 +4421,8 @@ impl GitPanel {
 
                 match result {
                     Ok(()) => {
+                        this.commit_errors.remove(&repository_id);
+                        cx.notify();
                         this.set_skip_hooks_enabled(false, cx);
                         if options.amend {
                             this.set_amend_pending(false, cx);
@@ -4423,7 +4433,12 @@ impl GitPanel {
                             this.serialize(cx);
                         }
                     }
-                    Err(e) => this.show_error_toast("commit", e, cx),
+                    Err(e) => {
+                        this.commit_errors
+                            .insert(repository_id, format_git_error_toast_message(&e));
+                        this.show_error_toast("commit", e, cx);
+                        cx.notify();
+                    }
                 }
             })
             .ok();
@@ -7576,6 +7591,7 @@ impl GitPanel {
                                 h_flex()
                                     .gap_0p5()
                                     .children(enable_coauthors)
+                                    .children(self.render_commit_error_button(cx))
                                     .child(self.render_commit_button(cx)),
                             ),
                     ),
@@ -7658,6 +7674,31 @@ impl GitPanel {
                 )
                 .into_any_element(),
             ))
+    }
+
+    fn render_commit_error_button(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let repository_id = self.active_repository.as_ref()?.read(cx).id;
+        let output = self.commit_errors.get(&repository_id)?.clone();
+        let workspace = self.workspace.clone();
+
+        Some(
+            IconButton::new("commit-error-log", IconName::XCircle)
+                .shape(ui::IconButtonShape::Square)
+                .size(ButtonSize::Compact)
+                .icon_size(IconSize::Small)
+                .icon_color(Color::Error)
+                .aria_label("View Commit Error Log")
+                .tooltip(Tooltip::text("View Commit Error Log"))
+                .on_click(move |_, window, cx| {
+                    let output = output.clone();
+                    workspace
+                        .update(cx, |workspace, cx| {
+                            open_output("commit", workspace, &output, window, cx)
+                        })
+                        .ok();
+                })
+                .into_any_element(),
+        )
     }
 
     fn render_pending_amend(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -11200,9 +11241,9 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_skip_hooks_remains_enabled_after_failed_commit(cx: &mut TestAppContext) {
+    async fn test_failed_commit_log_persists_until_successful_retry(cx: &mut TestAppContext) {
         init_test(cx);
-        let (fs, _, _, panel, mut cx) = setup_git_panel_with_changes(
+        let (fs, _, workspace, panel, mut cx) = setup_git_panel_with_changes(
             cx,
             json!({
                 ".git": {},
@@ -11211,6 +11252,11 @@ mod tests {
             &[("file", StatusCode::Modified)],
         )
         .await;
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.open_panel::<GitPanel>(window, cx);
+        });
 
         fs.set_status_for_repo(
             path!("/project/.git").as_ref(),
@@ -11239,12 +11285,70 @@ mod tests {
         panel.read_with(&cx, |panel, _| {
             assert!(panel.skip_hooks_enabled());
         });
+
+        panel.read_with(&cx, |panel, cx| {
+            let repository_id = panel
+                .active_repository
+                .as_ref()
+                .expect("repository should be active")
+                .read(cx)
+                .id;
+            assert!(
+                panel
+                    .commit_errors
+                    .get(&repository_id)
+                    .is_some_and(|output| output.contains("nothing to commit"))
+            );
+        });
+
+        cx.executor().advance_clock(Duration::from_secs(30));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let commit_error_button = cx
+            .debug_bounds("ICON-XCircle")
+            .expect("commit error log button should remain after toast expires");
+        cx.simulate_click(commit_error_button.center(), Modifiers::none());
+
+        let commit_output = workspace.read_with(&cx, |workspace, cx| {
+            workspace
+                .item_of_type::<Editor>(cx)
+                .expect("clicking the error icon should open the commit log")
+                .read(cx)
+                .buffer()
+                .read(cx)
+                .text()
+        });
+        assert!(commit_output.contains("nothing to commit"));
+
+        fs.with_git_state(path!("/project/.git").as_ref(), false, |state| {
+            state
+                .index_contents
+                .insert(repo_path("file"), b"modified\n".to_vec());
+        })
+        .expect("fake repository should exist");
+        panel.update_in(&mut cx, |panel, window, cx| {
+            let focus_handle = panel.commit_editor.focus_handle(cx);
+            focus_handle.focus(window, cx);
+            assert!(panel.commit(&focus_handle, window, cx));
+        });
+        cx.run_until_parked();
+        panel.read_with(&cx, |panel, cx| {
+            assert!(!panel.skip_hooks_enabled());
+            let repository_id = panel
+                .active_repository
+                .as_ref()
+                .expect("repository should be active")
+                .read(cx)
+                .id;
+            assert!(!panel.commit_errors.contains_key(&repository_id));
+        });
+
         let commit_count = fs
             .with_git_state(path!("/project/.git").as_ref(), false, |state| {
                 state.commit_history.len()
             })
             .expect("fake repository should exist");
-        assert_eq!(commit_count, 0);
+        assert_eq!(commit_count, 1);
     }
 
     #[gpui::test]
