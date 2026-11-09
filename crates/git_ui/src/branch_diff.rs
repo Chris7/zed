@@ -737,15 +737,24 @@ impl BranchDiffToolbar {
             return;
         };
 
-        if let Some(outline_panel) = workspace.read(cx).panel::<OutlinePanel>(cx) {
-            outline_panel.update(cx, |outline_panel, cx| {
-                outline_panel.set_symbols_hidden(true, window, cx);
-            });
-        }
-
+        let Some(outline_panel) = workspace.read(cx).panel::<OutlinePanel>(cx) else {
+            return;
+        };
+        outline_panel.update(cx, |outline_panel, cx| {
+            outline_panel.set_symbols_hidden(true, window, cx);
+        });
+        let outline_panel_id = outline_panel.entity_id();
+        let outline_panel_position = workspace.read(cx).all_docks().into_iter().find_map(|dock| {
+            let dock = dock.read(cx);
+            dock.visible_panel()
+                .is_some_and(|panel| panel.panel_id() == outline_panel_id)
+                .then_some(dock.position())
+        });
         workspace.update(cx, |workspace, cx| {
-            if !workspace.toggle_panel_focus::<OutlinePanel>(window, cx) {
-                workspace.close_panel::<OutlinePanel>(window, cx);
+            if let Some(position) = outline_panel_position {
+                workspace.toggle_dock(position, window, cx);
+            } else {
+                workspace.focus_panel::<OutlinePanel>(window, cx);
             }
         });
     }
@@ -823,7 +832,6 @@ impl Render for BranchDiffToolbar {
             .read(cx)
             .is_empty();
         let is_ai_enabled = AgentSettings::get_global(cx).enabled(cx);
-        let files_focus_handle = focus_handle.clone();
 
         let show_review_button = !is_multibuffer_empty && is_ai_enabled;
 
@@ -907,15 +915,7 @@ impl Render for BranchDiffToolbar {
                             .size(IconSize::Small)
                             .color(Color::Muted),
                     )
-                    .tooltip(move |_, cx| {
-                        Tooltip::with_meta_in(
-                            "Toggle Changed Files",
-                            Some(&outline_panel::Toggle),
-                            "Show changed files in the Outline Panel.",
-                            &files_focus_handle,
-                            cx,
-                        )
-                    })
+                    .tooltip(Tooltip::text("Toggle Changed Files in the Outline Panel"))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.toggle_changed_files(window, cx);
                     })),
@@ -1336,11 +1336,110 @@ mod tests {
             assert!(workspace.dock_at_position(position).read(cx).is_open());
         });
 
+        workspace.update_in(cx, |workspace, window, cx| {
+            let position = outline_panel.read(cx).position(window, cx);
+            workspace
+                .dock_at_position(position)
+                .update(cx, |dock, cx| dock.set_open(false, window, cx));
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            let position = outline_panel.read(cx).position(window, cx);
+            assert!(!workspace.dock_at_position(position).read(cx).is_open());
+        });
+
+        toolbar.update_in(cx, |toolbar, window, cx| {
+            toolbar.toggle_changed_files(window, cx);
+        });
+        outline_panel.update_in(cx, |outline_panel, window, cx| {
+            assert!(outline_panel.focus_handle(cx).contains_focused(window, cx));
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            let position = outline_panel.read(cx).position(window, cx);
+            assert!(workspace.dock_at_position(position).read(cx).is_open());
+        });
+
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.workspace.close_panel_on_toggle = Some(true);
+            });
+        });
+        toolbar.update_in(cx, |toolbar, window, cx| {
+            toolbar.toggle_changed_files(window, cx);
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            let position = outline_panel.read(cx).position(window, cx);
+            assert!(!workspace.dock_at_position(position).read(cx).is_open());
+        });
+
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.workspace.close_panel_on_toggle = Some(false);
+            });
+        });
+        toolbar.update_in(cx, |toolbar, window, cx| {
+            toolbar.toggle_changed_files(window, cx);
+        });
+        outline_panel.update_in(cx, |outline_panel, window, cx| {
+            assert!(outline_panel.focus_handle(cx).contains_focused(window, cx));
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            let position = outline_panel.read(cx).position(window, cx);
+            assert!(workspace.dock_at_position(position).read(cx).is_open());
+            branch_diff.focus_handle(cx).focus(window, cx);
+            assert!(
+                !outline_panel
+                    .read(cx)
+                    .focus_handle(cx)
+                    .contains_focused(window, cx)
+            );
+        });
+
         toolbar.update_in(cx, |toolbar, window, cx| {
             toolbar.toggle_changed_files(window, cx);
         });
         outline_panel.update_in(cx, |outline_panel, window, cx| {
             assert!(!outline_panel.focus_handle(cx).contains_focused(window, cx));
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            let position = outline_panel.read(cx).position(window, cx);
+            assert!(!workspace.dock_at_position(position).read(cx).is_open());
+        });
+
+        let test_panel = workspace.update_in(cx, |workspace, window, cx| {
+            let position = outline_panel.read(cx).position(window, cx);
+            let test_panel = cx.new(|cx| workspace::dock::test::TestPanel::new(position, 100, cx));
+            workspace.add_panel(test_panel.clone(), window, cx);
+            workspace.open_panel::<workspace::dock::test::TestPanel>(window, cx);
+            test_panel
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            let position = outline_panel.read(cx).position(window, cx);
+            assert_eq!(
+                workspace
+                    .dock_at_position(position)
+                    .read(cx)
+                    .visible_panel()
+                    .map(|panel| panel.panel_id()),
+                Some(test_panel.entity_id())
+            );
+        });
+        toolbar.update_in(cx, |toolbar, window, cx| {
+            toolbar.toggle_changed_files(window, cx);
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            let position = outline_panel.read(cx).position(window, cx);
+            let dock = workspace.dock_at_position(position).read(cx);
+            assert!(dock.is_open());
+            assert_eq!(
+                dock.visible_panel().map(|panel| panel.panel_id()),
+                Some(outline_panel.entity_id())
+            );
+        });
+        outline_panel.update_in(cx, |outline_panel, window, cx| {
+            assert!(outline_panel.focus_handle(cx).contains_focused(window, cx));
+        });
+        toolbar.update_in(cx, |toolbar, window, cx| {
+            toolbar.toggle_changed_files(window, cx);
         });
         workspace.update_in(cx, |workspace, window, cx| {
             let position = outline_panel.read(cx).position(window, cx);
