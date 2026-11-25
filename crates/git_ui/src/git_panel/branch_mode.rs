@@ -669,7 +669,10 @@ impl GitPanel {
         cx: &App,
     ) -> Option<Entity<DiffBufferList>> {
         let git_store = self.project.read(cx).git_store().read(cx);
-        if git_store.diff_base() != GitDiffBaseSetting::DefaultBranch {
+        if !matches!(
+            git_store.diff_base(),
+            GitDiffBaseSetting::DefaultBranch | GitDiffBaseSetting::ParentBranch
+        ) {
             return None;
         }
         git_store

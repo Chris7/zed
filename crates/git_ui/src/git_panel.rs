@@ -18489,6 +18489,99 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_parent_branch_panel_diff_reuses_display_list(cx: &mut TestAppContext) {
+        let (test, mut cx) = setup_branch_mode_test(cx, Some("refs/remotes/origin/main")).await;
+        let cx = &mut cx;
+        let panel = test.panel.clone();
+        test.fs
+            .with_git_state(Path::new(path!("/project/.git")), true, |state| {
+                state.parent_branch_name = Some("topic".into());
+            })
+            .expect("set parent branch");
+        cx.update(|_, cx| {
+            SettingsStore::update_global(cx, |settings, cx| {
+                settings
+                    .set_user_settings(r#"{ "git": { "diff_base": "parent_branch" } }"#, cx)
+                    .result()
+                    .expect("parse parent branch setting");
+            });
+        });
+        cx.run_until_parked();
+
+        test.workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.open_panel::<GitPanel>(window, cx);
+        });
+        panel.update_in(cx, |panel, window, cx| {
+            panel.show_branch_changes_since("topic".into(), window, cx);
+        });
+        settle_branch_mode(cx);
+
+        let repository_id = test.project.read_with(cx, |project, cx| {
+            project
+                .active_repository(cx)
+                .expect("active repository")
+                .read(cx)
+                .id
+        });
+        let display_list = test.project.read_with(cx, |project, cx| {
+            project
+                .git_store()
+                .read(cx)
+                .display_diff_for_repo(repository_id)
+                .expect("parent branch display list")
+        });
+        assert_eq!(
+            display_list.read_with(cx, |list, _| list.diff_base().clone()),
+            DiffBase::Merge {
+                base_ref: "topic".into()
+            }
+        );
+
+        let entry_index = panel.read_with(cx, |panel, _| {
+            panel
+                .entry_by_path(&repo_path("d.txt"))
+                .expect("changed row")
+        });
+        panel.update_in(cx, |panel, window, cx| {
+            panel.selected_entry = Some(entry_index);
+            panel.open_diff(&menu::Confirm, window, cx);
+        });
+        settle_branch_mode(cx);
+
+        let (opened_tab, opened_list) = test.workspace.read_with(cx, |workspace, cx| {
+            let tab = workspace
+                .active_item_as::<BranchDiff>(cx)
+                .expect("panel should open the parent branch diff");
+            let list = tab.read(cx).branch_diff_list(cx);
+            (tab, list)
+        });
+        assert_eq!(opened_list.entity_id(), display_list.entity_id());
+
+        cx.update(|window, cx| {
+            window.dispatch_action(crate::project_diff::DeployBranchDiff.boxed_clone(), cx);
+        });
+        settle_branch_mode(cx);
+
+        let (tabs, active_tab) = test.workspace.read_with(cx, |workspace, cx| {
+            let tabs = workspace
+                .items_of_type::<BranchDiff>(cx)
+                .collect::<Vec<_>>();
+            let active_tab = workspace
+                .active_item_as::<BranchDiff>(cx)
+                .expect("branch diff should remain active");
+            (tabs, active_tab)
+        });
+        assert_eq!(branch_diff_bases(&test.workspace, cx), ["topic"]);
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(active_tab.entity_id(), opened_tab.entity_id());
+        assert_eq!(
+            active_tab.read_with(cx, |tab, cx| { tab.branch_diff_list(cx).entity_id() }),
+            display_list.entity_id()
+        );
+    }
+
+    #[gpui::test]
     async fn test_branch_mode_row_open_in_new_tab_shows_that_row(cx: &mut TestAppContext) {
         let (test, mut cx) = setup_branch_mode_test(cx, Some("refs/remotes/origin/main")).await;
         let cx = &mut cx;
