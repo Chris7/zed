@@ -1272,20 +1272,19 @@ mod tests {
                 .active_repository()
                 .expect("active repository")
         });
-        let branch_diff = cx
-            .update(|window, cx| {
-                BranchDiff::new_with_branch_base(
+        let branch_diff = cx.update(|window, cx| {
+            cx.new(|cx| {
+                BranchDiff::new_with_base_ref(
                     project.clone(),
                     workspace.clone(),
                     "origin/main".into(),
-                    repository,
+                    Some(repository),
                     None,
                     window,
                     cx,
                 )
             })
-            .await
-            .unwrap();
+        });
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.add_item_to_active_pane(
                 Box::new(branch_diff.clone()),

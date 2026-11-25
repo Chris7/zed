@@ -11316,6 +11316,7 @@ mod tests {
                 .read(cx)
                 .buffer()
                 .read(cx)
+                .snapshot(cx)
                 .text()
         });
         assert!(commit_output.contains("nothing to commit"));
