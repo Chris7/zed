@@ -129,13 +129,13 @@ package_build() {
 
     CC_x86_64_unknown_linux_musl=musl-gcc cargo \
         --config .cargo/bundle-config.toml --config profile.release.debug=0 rustc \
-        --release --package remote_server --bin remote_server \
+        --release --package remote_server --bin remote-server \
         --target x86_64-unknown-linux-musl -- \
         -C linker="$CC" -C link-arg=-fuse-ld=mold -C link-arg=--ld-path="$MOLD"
 
     local zed_binary="$build_dir/x86_64-unknown-linux-gnu/release/zed"
     local cli_binary="$build_dir/x86_64-unknown-linux-gnu/release/cli"
-    local remote_binary="$build_dir/x86_64-unknown-linux-musl/release/remote_server"
+    local remote_binary="$build_dir/x86_64-unknown-linux-musl/release/remote-server"
     for binary in "$zed_binary" "$cli_binary" "$remote_binary"; do
         if [[ ! -x "$binary" ]]; then
             printf 'Build output is missing: %s\n' "$binary" >&2
